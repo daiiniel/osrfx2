@@ -26,10 +26,16 @@ MODULE_DEVICE_TABLE(usb, osrfx2_table);
 struct osrfx2_skel{
     struct usb_device*      dev;
     struct usb_interface*   interface;
+
     unsigned char*          bulk_in_buffer;
     size_t                  bulk_in_buffer_size;
+
     u8                      bulk_in_endpointAddr;
     u8                      bulk_out_endpointAddr;
+
+    u8                      interrupt_endpointAddr;
+    u8                      interrupt_maxPacketSize;
+    u8                      interrupt_interval;
     struct kref             kref;
 };
 
@@ -135,27 +141,101 @@ static ssize_t osrfx2_read (struct file * filep, char __user * buffer, size_t co
     return retval;
 }
 
+static void osrfx2_write_callback(struct urb* urb)
+{
+    struct osrfx2_skel* dev;
+
+    dev = urb->context;
+
+    if(urb->status)
+    {
+        printk(KERN_ERR "osrfx2: could not successfully transfer the data to the device");
+    }
+    else
+    {
+        printk(KERN_INFO "osrfx2: data successfully transferred to the device");
+    }
+
+    usb_free_coherent(dev->dev, urb->transfer_buffer_length, urb->transfer_buffer, urb->transfer_dma);
+}
+
 static ssize_t osrfx2_write (struct file * filep, const char __user * buffer, size_t count, loff_t * offset)
 {
     int retval = 0;
     struct osrfx2_skel* dev;
 
+    char* buf = NULL;
+    struct urb* urb = NULL;
+
     dev = (struct osrfx2_skel*) filep->private_data;
 
-    retval = usb_bulk_msg(
+    if(count == 0)
+        return count;
+
+    urb = usb_alloc_urb(0, GFP_KERNEL);
+
+    if(!urb)
+    {
+        retval = -ENOMEM;
+        printk(KERN_ERR "osrfx2: Could not alloc urb\n");
+
+        goto error;
+    }
+
+    buf = usb_alloc_coherent(dev->dev, count, GFP_KERNEL, &urb->transfer_dma);
+
+    if(!buf)
+    {
+        retval = ENOMEM;
+        printk(KERN_ERR "osrfx2: Could not allocate buffer\n");
+
+        goto error;
+    }
+
+    if(copy_from_user(buf, buffer, count))
+    {
+        retval = -EFAULT;
+
+        goto error;
+    }
+
+    usb_fill_bulk_urb(
+                urb,
                 dev->dev,
                 usb_sndbulkpipe(dev->dev, dev->bulk_out_endpointAddr),
-                buffer,
+                buf,
                 count,
-                (int*) &count,
-                HZ);
+                osrfx2_write_callback,
+                dev);
+
+    retval = usb_submit_urb(urb, GFP_KERNEL);
 
     if(retval)
     {
-        printk(KERN_ERR "osrfx2: Could not send bulk send message.");
+        printk(KERN_ERR "osrfx2: Could not send bulk send message\n");
+
+        goto error;
     }
 
-    return (ssize_t) count;
+    usb_free_urb(urb);
+
+    return count;
+
+error:
+
+
+    if(buf)
+    {
+        usb_free_coherent(dev->dev, count, buf, urb->transfer_dma);
+        kfree(buf);
+    }
+
+    if(urb)
+    {
+        usb_free_urb(urb);
+    }
+
+    return retval;
 }
 
 
@@ -235,6 +315,17 @@ static int osrfx2_probe(struct usb_interface* intf, const struct usb_device_id* 
                 (endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_BULK)
         {
             printk(KERN_INFO "osrfx2: Out bulk endpoint found at enpoint %d\n", endpoint->bEndpointAddress);
+
+            dev->bulk_out_endpointAddr = endpoint->bEndpointAddress;
+        }
+
+        if((endpoint->bEndpointAddress & USB_DIR_OUT) &&
+                (endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT)
+        {
+            printk(KERN_INFO "osrfx2: Out interrupt found at endpoint %d\n", endpoint->bEndpointAddress);
+
+            dev->interrupt_endpointAddr = endpoint->bEndpointAddress;
+            dev->interrupt_interval = endpoint->bInterval;
         }
     }
 
