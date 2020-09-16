@@ -12,7 +12,7 @@
 
 #define OSRFX2_MIN_BASE 192
 
-#define OSRFX2_TIMEOUT  HZ
+#define OSRFX2_TIMEOUT  10*HZ
 
 #define SUCCESS         0
 
@@ -162,13 +162,13 @@ static ssize_t osrfx2_read (struct file * filep, char __user * buffer, size_t co
                 dev->dev,
                 usb_rcvbulkpipe(dev->dev, dev->bulk_in_endpointAddr),
                 dev->bulk_in_buffer,
-                count < dev->bulk_in_maxBufferSize ? count : dev->bulk_in_maxBufferSize,
+                (count < dev->bulk_in_maxBufferSize) ? count : dev->bulk_in_maxBufferSize,
                 (int*) &count,
                 OSRFX2_TIMEOUT);
 
     if(retval != 0)
     {
-        printk(KERN_ERR "osrfx2: Could not submit read bulk read message.");
+        printk(KERN_ERR "osrfx2: Could not submit read bulk read message. Error code: %d\n", retval);
     }
     else
     {
@@ -193,11 +193,11 @@ static void osrfx2_write_callback(struct urb* urb)
 
     if(urb->status)
     {
-        printk(KERN_ERR "osrfx2: Could not successfully transfer the data to the device");
+        printk(KERN_ERR "osrfx2: Could not transfer data to the device. Error code: %d\n", urb->status);
     }
     else
     {
-        printk(KERN_INFO "osrfx2: Data successfully transferred to the device");
+        printk(KERN_INFO "osrfx2: Data successfully transferred to the device\n");
     }
 
     usb_free_coherent(dev->dev, urb->transfer_buffer_length, urb->transfer_buffer, urb->transfer_dma);
@@ -321,6 +321,11 @@ static void interrupt_callback(struct urb* urb)
         //UPDATE VALUE
         packet = urb->transfer_buffer;
 
+        if(dev->switches_state.octet != packet->octet)
+        {
+            dev_info(&dev->dev->dev, "osrfx2: Switches changed: %d", packet->octet);
+        }
+
         dev->switches_state = *packet;
 
 
@@ -330,7 +335,7 @@ static void interrupt_callback(struct urb* urb)
 
         if(res != 0)
         {
-            dev_err(&dev->dev->dev, "osrfx2: Urb could not be submited. Error code: %04x", res);
+            dev_err(&dev->dev->dev, "osrfx2: 1. Urb could not be submited. Error code: %d\n", res);
         }
 
         return;
@@ -342,7 +347,7 @@ static void interrupt_callback(struct urb* urb)
             case -ESHUTDOWN:
                 return;
             default:
-                dev_err(&dev->dev->dev, "osrfx2: Urb could not be submited. Error code: %04x", res);
+                dev_err(&dev->dev->dev, "osrfx2: 2. Urb could not be submited. Error code: %04x. Line: ", res);
 
                 return;
     }
@@ -361,9 +366,10 @@ static int init_interrupt(struct osrfx2_skel* dev)
         goto error;
     }
 
+    dev->interrupt_maxPacketSize = sizeof(struct  switches);
     dev->interrupt_buffer = kzalloc(dev->interrupt_maxPacketSize, GFP_KERNEL);
 
-    if(dev->interrupt_urb == NULL)
+    if(dev->interrupt_buffer == NULL)
     {
         retval = -ENOMEM;
 
@@ -424,7 +430,7 @@ static int osrfx2_probe(struct usb_interface* intf, const struct usb_device_id* 
 
     if(dev == NULL)
     {
-        printk(KERN_ERR "osrfx2: Could not alloc osfrx2 struct\n");
+        printk(KERN_ERR "osrfx2: Could not allocate osfrx2 struct\n");
 
         goto error;
     }
@@ -444,11 +450,9 @@ static int osrfx2_probe(struct usb_interface* intf, const struct usb_device_id* 
     {
         endpoint = &iface_desc->endpoint[ii].desc;
 
-        if(endpoint->bEndpointAddress & USB_DIR_IN &&
+        if((endpoint->bEndpointAddress & USB_DIR_IN) &&
                 (endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_BULK)
         {
-            printk(KERN_INFO "osrfx2: In bulk endpoint found at enpoint %d\n", endpoint->bEndpointAddress);
-
             dev->bulk_in_endpointAddr = endpoint->bEndpointAddress;
             dev->bulk_in_maxBufferSize = endpoint->wMaxPacketSize;
             dev->bulk_in_buffer = kzalloc(dev->bulk_in_maxBufferSize, GFP_KERNEL);
@@ -461,26 +465,35 @@ static int osrfx2_probe(struct usb_interface* intf, const struct usb_device_id* 
             }
         }
 
-        if(endpoint->bEndpointAddress & USB_DIR_OUT &&
+        if((endpoint->bEndpointAddress & USB_DIR_IN) == 0 &&
                 (endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_BULK)
         {
-            printk(KERN_INFO "osrfx2: Out bulk endpoint found at enpoint %d\n", endpoint->bEndpointAddress);
-
             dev->bulk_out_endpointAddr = endpoint->bEndpointAddress;
             dev->bulk_out_maxBufferSize = endpoint->wMaxPacketSize;
         }
 
-        if((endpoint->bEndpointAddress & USB_DIR_OUT) &&
+        if((endpoint->bEndpointAddress & USB_DIR_IN) &&
                 (endpoint->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT)
         {
-            printk(KERN_INFO "osrfx2: Out interrupt found at endpoint %d\n", endpoint->bEndpointAddress);
-
             dev->interrupt_endpointAddr = endpoint->bEndpointAddress;
             dev->interrupt_interval = endpoint->bInterval;
             dev->interrupt_maxPacketSize = endpoint->wMaxPacketSize;
 
             init_interrupt(dev);
         }
+    }
+
+    //Register interrupt
+
+    retval = init_interrupt(dev);
+
+    if(retval == 0)
+    {
+        printk(KERN_INFO "osrfx2: Interrupt registered\n");
+    }
+    else
+    {
+        printk(KERN_INFO "osrfx2: Could not register interrupt. Code: %d\n", retval);
     }
 
     //Register usb device
@@ -490,9 +503,9 @@ static int osrfx2_probe(struct usb_interface* intf, const struct usb_device_id* 
     if(retval)
     {
         printk(KERN_ERR "osrfx2: Could not register usb driver\n");
-    }
 
-    printk(KERN_INFO "osrfx2: Device was connected\n");
+        goto error;
+    }
 
     return SUCCESS;
 
@@ -517,7 +530,9 @@ static void osrfx2_disconnect(struct usb_interface* intf)
     if(!dev)
         return;
 
-    kref_put(&dev->kref, osrfx2_delete);
+    kref_put(&dev->kref, osrfx2_delete);    
+
+    usb_deregister_dev(dev->interface, &osrfx2_class);
 }
 
 static struct usb_driver osrfx2_driver = {
@@ -536,16 +551,12 @@ static int osrfx2_init(void)
     if(result != 0)
         printk(KERN_ERR "osrfx2: Could not register osrfx2 driver. Error code: %d\n", result);
 
-    printk(KERN_INFO "osrfx2: USB OSRFX2 successully registered\n");
-
     return SUCCESS;
 }
 
 static void osrfx2_exit(void)
 {
     usb_deregister(&osrfx2_driver);
-
-    printk(KERN_INFO "Uosrfx2: SB OSRFX2 successully deregistered\n");
 }
 
 module_init(osrfx2_init)
