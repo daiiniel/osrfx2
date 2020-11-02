@@ -14,6 +14,13 @@
 
 #define OSRFX2_TIMEOUT  10*HZ
 
+#define READ_7_SEGMENT_DISPLAY  0xD4
+#define READ_SWITCHES           0xD6
+#define READ_BARGRAPH_DISPLAY   0xD7
+#define SET_BARGRAPH_DISPLAY    0xD8
+#define IS_HIGH_SPEED           0xD9
+#define SET_7_SEGMENT_DISPLAY   0xDB
+
 #define SUCCESS         0
 
 MODULE_LICENSE("GPL");
@@ -24,6 +31,24 @@ static struct usb_device_id osrfx2_table [] = {
 };
 
 MODULE_DEVICE_TABLE(usb, osrfx2_table);
+
+struct bargraph {
+    union {
+        struct
+        {
+            char led1 : 1;
+            char led2 : 1;
+            char led3 : 1;
+            char led4 : 1;
+            char led5 : 1;
+            char led6 : 1;
+            char led7 : 1;
+            char led8 : 1;
+        };
+
+        char data;
+    };
+};
 
 struct switches {
     union {
@@ -39,7 +64,7 @@ struct switches {
             char sw8 : 1;
         };
 
-        char octet;
+        char data;
     };
 };
 
@@ -282,7 +307,6 @@ error:
     return retval;
 }
 
-
 static struct file_operations osrfx2_fops = {
     .open = osrfx2_open,
     .write = osrfx2_write,
@@ -321,9 +345,9 @@ static void interrupt_callback(struct urb* urb)
         //UPDATE VALUE
         packet = urb->transfer_buffer;
 
-        if(dev->switches_state.octet != packet->octet)
+        if(dev->switches_state.data != packet->data)
         {
-            dev_info(&dev->dev->dev, "osrfx2: Switches changed: %d", packet->octet);
+            dev_info(&dev->dev->dev, "osrfx2: Switches changed: %d", packet->data);
         }
 
         dev->switches_state = *packet;
@@ -413,6 +437,108 @@ error:
 
     return retval;
 }
+
+ssize_t get_bargraph(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct osrfx2_skel* data = NULL;
+    struct bargraph* state = NULL;
+
+    int retval = SUCCESS;
+
+    data = usb_get_intfdata(to_usb_interface(dev));
+
+    state = kmalloc(GFP_KERNEL, sizeof(struct bargraph));
+
+    if(state == NULL)
+        return -ENOMEM;
+
+    retval = usb_control_msg(
+                data->dev,
+                usb_sndctrlpipe(
+                    data->dev,
+                    0),
+                READ_BARGRAPH_DISPLAY,
+                USB_DIR_IN | USB_TYPE_VENDOR,
+                0,
+                0,
+                state,
+                sizeof(struct bargraph),
+                OSRFX2_TIMEOUT);
+
+    if(retval < 0)
+    {
+        dev_err(&data->dev->dev, "Could not submit \"get_bargraph\" urb.\n");
+        kfree(state);
+
+        return retval;
+    }
+
+    retval = sprintf(buf,
+            "%s%s%s%s%s%s%s%s",
+            state->led1 ? "*" : "_",
+            state->led2 ? "*" : "_",
+            state->led3 ? "*" : "_",
+            state->led4 ? "*" : "_",
+            state->led5 ? "*" : "_",
+            state->led6 ? "*" : "_",
+            state->led7 ? "*" : "_",
+            state->led8 ? "*" : "_");
+
+    kfree(state);
+
+    return retval;
+}
+
+ssize_t set_bargraph(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct osrfx2_skel* data = NULL;
+    struct bargraph* state = NULL;
+
+    int retval = SUCCESS;
+    unsigned long value = 0;
+
+    char* end;
+
+    data = usb_get_intfdata(to_usb_interface(dev));
+
+    state = kmalloc(GFP_KERNEL, sizeof(struct bargraph));
+
+    if(state == NULL)
+    {
+        return -ENOMEM;
+    }
+
+    value = simple_strtoul(buf, &end, 10);
+
+    if(buf == end)
+        value = 0;
+
+    state->data = value & 0xFF;
+
+    retval = usb_control_msg(
+                data->dev,
+                usb_sndctrlpipe(
+                    data->dev,
+                    0),
+                SET_BARGRAPH_DISPLAY,
+                USB_DIR_OUT | USB_TYPE_VENDOR,
+                0,
+                0,
+                state,
+                sizeof(struct bargraph),
+                OSRFX2_TIMEOUT);
+
+    if(retval < 0)
+    {
+        dev_err(&data->dev->dev, "Could not send \"set_bargraph\" urb.\n");
+    }
+
+    kfree(state);
+
+    return retval;
+}
+
+static DEVICE_ATTR(bargraph, 0770, get_bargraph, set_bargraph);
 
 static int osrfx2_probe(struct usb_interface* intf, const struct usb_device_id* id)
 {
@@ -507,6 +633,8 @@ static int osrfx2_probe(struct usb_interface* intf, const struct usb_device_id* 
         goto error;
     }
 
+    device_create_file(&intf->dev, &dev_attr_bargraph);
+
     return SUCCESS;
 
 error:
@@ -530,9 +658,9 @@ static void osrfx2_disconnect(struct usb_interface* intf)
     if(!dev)
         return;
 
-    kref_put(&dev->kref, osrfx2_delete);    
-
     usb_deregister_dev(dev->interface, &osrfx2_class);
+
+    kref_put(&dev->kref, osrfx2_delete);
 }
 
 static struct usb_driver osrfx2_driver = {
