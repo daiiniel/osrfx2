@@ -474,7 +474,7 @@ ssize_t get_bargraph(struct device *dev, struct device_attribute *attr, char *bu
     }
 
     retval = sprintf(buf,
-            "%s%s%s%s%s%s%s%s",
+            "%s%s%s%s%s%s%s%s\n",
             state->led1 ? "*" : "_",
             state->led2 ? "*" : "_",
             state->led3 ? "*" : "_",
@@ -535,7 +535,7 @@ ssize_t set_bargraph(struct device *dev, struct device_attribute *attr, const ch
 
     kfree(state);
 
-    return retval;
+    return count;
 }
 
 static DEVICE_ATTR(bargraph, 0770, get_bargraph, set_bargraph);
